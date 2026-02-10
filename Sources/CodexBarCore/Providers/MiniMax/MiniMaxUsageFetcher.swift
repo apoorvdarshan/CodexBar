@@ -8,7 +8,6 @@ public struct MiniMaxUsageFetcher: Sendable {
     private static let codingPlanPath = "user-center/payment/coding-plan"
     private static let codingPlanQuery = "cycle_type=3"
     private static let codingPlanRemainsPath = "v1/api/openplatform/coding_plan/remains"
-    private static let apiRemainsURL = URL(string: "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains")!
     private struct RemainsContext: Sendable {
         let authorizationToken: String?
         let groupID: String?
@@ -51,6 +50,7 @@ public struct MiniMaxUsageFetcher: Sendable {
 
     public static func fetchUsage(
         apiToken: String,
+        region: MiniMaxAPIRegion = .global,
         now: Date = Date()) async throws -> MiniMaxUsageSnapshot
     {
         let cleaned = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -58,9 +58,29 @@ public struct MiniMaxUsageFetcher: Sendable {
             throw MiniMaxUsageError.invalidCredentials
         }
 
-        var request = URLRequest(url: self.apiRemainsURL)
+        do {
+            return try await self.fetchAPITokenUsage(apiToken: cleaned, region: region, now: now)
+        } catch let error as MiniMaxUsageError where error == .invalidCredentials && region == .global {
+            Self.log.debug("MiniMax global host returned invalid credentials, retrying with China host")
+            do {
+                return try await self.fetchAPITokenUsage(apiToken: cleaned, region: .chinaMainland, now: now)
+            } catch {
+                // Preserve the original invalidCredentials error so shouldFallback
+                // still recognises it. A raw transport error from the China host
+                // (e.g. DNS failure) would bypass MiniMaxUsageError handling.
+                throw MiniMaxUsageError.invalidCredentials
+            }
+        }
+    }
+
+    private static func fetchAPITokenUsage(
+        apiToken: String,
+        region: MiniMaxAPIRegion,
+        now: Date) async throws -> MiniMaxUsageSnapshot
+    {
+        var request = URLRequest(url: region.apiRemainsURL)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(cleaned)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("CodexBar", forHTTPHeaderField: "MM-API-Source")
