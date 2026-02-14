@@ -58,22 +58,29 @@ public struct MiniMaxUsageFetcher: Sendable {
             throw MiniMaxUsageError.invalidCredentials
         }
 
+        // Historically, MiniMax API token fetching used a China endpoint by default in some configurations. If the
+        // user has no persisted region and we default to `.global`, retry the China endpoint when the global host
+        // rejects the token so upgrades don't regress existing setups.
+        if region != .global {
+            return try await self.fetchUsageOnce(apiToken: cleaned, region: region, now: now)
+        }
+
         do {
-            return try await self.fetchAPITokenUsage(apiToken: cleaned, region: region, now: now)
-        } catch let error as MiniMaxUsageError where error == .invalidCredentials && region == .global {
-            Self.log.debug("MiniMax global host returned invalid credentials, retrying with China host")
+            return try await self.fetchUsageOnce(apiToken: cleaned, region: .global, now: now)
+        } catch let error as MiniMaxUsageError {
+            guard case .invalidCredentials = error else { throw error }
+            Self.log.debug("MiniMax API token rejected for global host, retrying China mainland host")
             do {
-                return try await self.fetchAPITokenUsage(apiToken: cleaned, region: .chinaMainland, now: now)
+                return try await self.fetchUsageOnce(apiToken: cleaned, region: .chinaMainland, now: now)
             } catch {
-                // Preserve the original invalidCredentials error so shouldFallback
-                // still recognises it. A raw transport error from the China host
-                // (e.g. DNS failure) would bypass MiniMaxUsageError handling.
+                // Preserve the original invalid-credentials error so the fetch pipeline can fall back to web.
+                Self.log.debug("MiniMax China mainland retry failed, preserving global invalidCredentials")
                 throw MiniMaxUsageError.invalidCredentials
             }
         }
     }
 
-    private static func fetchAPITokenUsage(
+    private static func fetchUsageOnce(
         apiToken: String,
         region: MiniMaxAPIRegion,
         now: Date) async throws -> MiniMaxUsageSnapshot
